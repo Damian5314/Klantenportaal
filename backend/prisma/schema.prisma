@@ -1,0 +1,410 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity, roles & permissions (RBAC)
+// ---------------------------------------------------------------------------
+
+enum UserKind {
+  STAFF // admin / employee, logs into the back office
+  CUSTOMER // logs into the customer portal, always linked to a Contact
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  avatarUrl    String?
+  kind         UserKind @default(STAFF)
+  department   String?
+  jobTitle     String?
+  isActive     Boolean  @default(true)
+  workingHours Json? // e.g. { mon: ["09:00","17:00"], ... }
+
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  // set only when kind = CUSTOMER
+  contactId String?  @unique
+  contact   Contact? @relation(fields: [contactId], references: [id])
+
+  refreshTokens     RefreshToken[]
+  assignedTickets   Ticket[]              @relation("TicketAssignee")
+  ticketMessages    TicketMessage[]
+  internalNotes     TicketInternalNote[]
+  historyEntries    TicketHistoryEntry[]
+  notifications     Notification[]
+  kbArticlesAuthored KnowledgeBaseArticle[] @relation("KbAuthor")
+  kbVersionsEdited   KnowledgeBaseArticleVersion[]
+  uploadedFiles      Attachment[]
+  timeEntries        TicketTimeEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([roleId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false) // built-in roles cannot be deleted
+
+  users       User[]
+  permissions Permission[] @relation("RolePermissions")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Permission {
+  id          String @id @default(cuid())
+  key         String @unique // e.g. "tickets:assign", "settings:manage"
+  description String?
+
+  roles Role[] @relation("RolePermissions")
+}
+
+// ---------------------------------------------------------------------------
+// CRM: companies & contacts
+// ---------------------------------------------------------------------------
+
+model Company {
+  id      String  @id @default(cuid())
+  name    String
+  address String?
+  phone   String?
+  email   String?
+  notes   String?
+
+  contacts Contact[]
+  tickets  Ticket[]
+  contracts Contract[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Contact {
+  id    String @id @default(cuid())
+  name  String
+  email String @unique
+  phone String?
+  notes String?
+
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  user    User?
+  tickets Ticket[]              @relation("TicketRequester")
+  messages TicketMessage[]      @relation("MessageAuthorContact")
+  attachments Attachment[]      @relation("AttachmentUploaderContact")
+  historyEntries TicketHistoryEntry[] @relation("HistoryActorContact")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Contract {
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  reference String?
+  startDate DateTime?
+  endDate   DateTime?
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Ticketing configuration (configurable statuses / priorities / categories)
+// ---------------------------------------------------------------------------
+
+model TicketStatus {
+  id        String  @id @default(cuid())
+  name      String  @unique
+  order     Int     @default(0)
+  color     String  @default("#64748b")
+  isClosed  Boolean @default(false) // counts as "resolved/closed" for reporting
+  isDefault Boolean @default(false) // used for newly created tickets
+
+  tickets Ticket[]
+}
+
+model TicketPriority {
+  id      String @id @default(cuid())
+  name    String @unique
+  order   Int    @default(0)
+  color   String @default("#64748b")
+
+  tickets Ticket[]
+}
+
+model TicketCategory {
+  id       String           @id @default(cuid())
+  name     String
+  parentId String?
+  parent   TicketCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children TicketCategory[] @relation("CategoryTree")
+
+  tickets Ticket[]
+}
+
+model Label {
+  id    String @id @default(cuid())
+  name  String @unique
+  color String @default("#64748b")
+
+  tickets Ticket[] @relation("TicketLabels")
+}
+
+// ---------------------------------------------------------------------------
+// Ticketing core
+// ---------------------------------------------------------------------------
+
+model Ticket {
+  id          String @id @default(cuid())
+  number      Int    @unique @default(autoincrement())
+  subject     String
+  description String
+
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  contactId String
+  contact   Contact @relation("TicketRequester", fields: [contactId], references: [id])
+
+  statusId   String
+  status     TicketStatus @relation(fields: [statusId], references: [id])
+  priorityId String
+  priority   TicketPriority @relation(fields: [priorityId], references: [id])
+
+  categoryId String?
+  category   TicketCategory? @relation(fields: [categoryId], references: [id])
+
+  assignedToId String?
+  assignedTo   User?   @relation("TicketAssignee", fields: [assignedToId], references: [id])
+
+  labels Label[] @relation("TicketLabels")
+
+  messages      TicketMessage[]
+  internalNotes TicketInternalNote[]
+  history       TicketHistoryEntry[]
+  attachments   Attachment[]
+  timeEntries   TicketTimeEntry[]
+
+  closedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([statusId])
+  @@index([priorityId])
+  @@index([assignedToId])
+  @@index([companyId])
+  @@index([contactId])
+}
+
+model TicketMessage {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  authorUserId String?
+  authorUser   User?   @relation(fields: [authorUserId], references: [id])
+  authorContactId String?
+  authorContact   Contact? @relation("MessageAuthorContact", fields: [authorContactId], references: [id])
+
+  body      String
+  isInboundEmail Boolean @default(false)
+
+  attachments Attachment[]
+  createdAt   DateTime     @default(now())
+
+  @@index([ticketId])
+}
+
+model TicketInternalNote {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  authorUserId String
+  authorUser   User   @relation(fields: [authorUserId], references: [id])
+
+  body        String
+  attachments Attachment[]
+  createdAt   DateTime     @default(now())
+
+  @@index([ticketId])
+}
+
+model TicketHistoryEntry {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  actorUserId String?
+  actorUser   User?   @relation(fields: [actorUserId], references: [id])
+  actorContactId String?
+  actorContact   Contact? @relation("HistoryActorContact", fields: [actorContactId], references: [id])
+
+  action    String // e.g. "created", "status_changed", "priority_changed", "assigned", "commented", "note_added", "closed"
+  fromValue String?
+  toValue   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+model TicketTimeEntry {
+  id       String @id @default(cuid())
+  ticketId String
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  minutes     Int
+  description String?
+  createdAt   DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (shared by tickets, messages, notes, KB articles)
+// ---------------------------------------------------------------------------
+
+model Attachment {
+  id           String  @id @default(cuid())
+  filename     String // stored filename on disk
+  originalName String
+  mimeType     String
+  size         Int
+  url          String
+
+  uploadedByUserId String?
+  uploadedByUser   User?   @relation(fields: [uploadedByUserId], references: [id])
+  uploadedByContactId String?
+  uploadedByContact   Contact? @relation("AttachmentUploaderContact", fields: [uploadedByContactId], references: [id])
+
+  ticketId String?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  ticketMessageId String?
+  ticketMessage   TicketMessage? @relation(fields: [ticketMessageId], references: [id], onDelete: Cascade)
+
+  internalNoteId String?
+  internalNote   TicketInternalNote? @relation(fields: [internalNoteId], references: [id], onDelete: Cascade)
+
+  kbArticleId String?
+  kbArticle   KnowledgeBaseArticle? @relation(fields: [kbArticleId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base
+// ---------------------------------------------------------------------------
+
+enum KbVisibility {
+  PUBLIC
+  INTERNAL
+}
+
+model KnowledgeBaseCategory {
+  id       String                  @id @default(cuid())
+  name     String
+  parentId String?
+  parent   KnowledgeBaseCategory?  @relation("KbCategoryTree", fields: [parentId], references: [id])
+  children KnowledgeBaseCategory[] @relation("KbCategoryTree")
+
+  articles KnowledgeBaseArticle[]
+}
+
+model KbTag {
+  id   String @id @default(cuid())
+  name String @unique
+
+  articles KnowledgeBaseArticle[] @relation("KbArticleTags")
+}
+
+model KnowledgeBaseArticle {
+  id      String @id @default(cuid())
+  title   String
+  slug    String @unique
+  content String // markdown
+
+  categoryId String?
+  category   KnowledgeBaseCategory? @relation(fields: [categoryId], references: [id])
+  tags       KbTag[]                @relation("KbArticleTags")
+
+  visibility KbVisibility @default(INTERNAL)
+
+  authorId String
+  author   User   @relation("KbAuthor", fields: [authorId], references: [id])
+
+  versions    KnowledgeBaseArticleVersion[]
+  attachments Attachment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model KnowledgeBaseArticleVersion {
+  id        String @id @default(cuid())
+  articleId String
+  article   KnowledgeBaseArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  content    String
+  editedById String
+  editedBy   User   @relation(fields: [editedById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([articleId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    String // e.g. "ticket_assigned", "ticket_reply", "status_changed"
+  title   String
+  body    String?
+  link    String?
+  isRead  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
